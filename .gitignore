@@ -51,9 +51,9 @@ build/
 target/
 out/
 coverage/
-.env
-.env.*
-*.env
+.env.local
+.env.*.local
+!.env
 
 # 忽略 IDE 和编辑器相关文件
 .idea/
