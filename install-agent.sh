@@ -1,56 +1,28 @@
 #!/bin/bash
 
 # Better Monitor Agent 一键安装脚本
-# 使用方法:
-#   curl -fsSL https://raw.githubusercontent.com/EnderKC/BetterMonitor/main/install-agent.sh \
-#     | bash -s -- --server-id 1 --secret-key your-secret --server https://dashboard.example.com
+# 使用方法: curl -fsSL https://your-domain.com/install-agent.sh | bash -s -- --server-id 1 --secret-key your-secret-key --server https://your-dashboard.com
 
-set -euo pipefail
+set -e
 
+# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
-INSTALL_ROOT="/opt/better-monitor"
-BIN_DIR="${INSTALL_ROOT}/bin"
-BINARY_NAME="better-monitor-agent"
+# 默认配置
+INSTALL_DIR="/opt/better-monitor"
 SERVICE_NAME="better-monitor-agent"
-CONFIG_DIR="/etc/better-monitor"
-CONFIG_FILE="${CONFIG_DIR}/agent.yaml"
-LOG_DIR="/var/log/better-monitor"
-GITHUB_REPO="EnderKC/BetterMonitor"
-RELEASE_CHANNEL="stable"
-DOWNLOAD_MIRROR=""
+BINARY_NAME="better-monitor-agent"
+GITHUB_REPO="EnderKC/BetterMonitor"  # 默认仓库，会从服务器获取
+
+# 参数
 SERVER_ID=""
 SECRET_KEY=""
 SERVER_URL=""
-SERVER_API_URL=""
-REGISTER_TOKEN=""
-HEARTBEAT_INTERVAL="10s"
-MONITOR_INTERVAL="30s"
-TMP_DIR=""
-SUDO_CMD=""
 
-usage() {
-    cat <<'EOF'
-用法: install-agent.sh --server-id <ID> --secret-key <KEY> --server <URL> [选项]
-
-必填参数:
-  --server-id <ID>        Dashboard 中服务器的 ID
-  --secret-key <KEY>      Dashboard 中服务器的密钥
-  --server <URL>          Dashboard 地址 (例如: https://dashboard.example.com:3333)
-
-可选参数:
-  --repo <OWNER/REPO>     自定义 Agent Release 仓库 (默认: EnderKC/BetterMonitor)
-  --channel <stable|prerelease|nightly>
-                          指定 release 通道 (默认: stable)
-  --mirror <URL>          GitHub Release 下载镜像地址
-  --token <TOKEN>         注册令牌，写入配置文件备用
-  -h, --help              显示帮助
-EOF
-}
-
+# 打印信息
 info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -64,26 +36,10 @@ error() {
     exit 1
 }
 
-cleanup() {
-    if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
-        rm -rf "$TMP_DIR"
-    fi
-}
-
-require_cmd() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        error "未找到命令: $1，请先安装后再执行脚本"
-    fi
-}
-
+# 解析命令行参数
 parse_args() {
-    if [[ $# -eq 0 ]]; then
-        usage
-        exit 1
-    fi
-
     while [[ $# -gt 0 ]]; do
-        case "$1" in
+        case $1 in
             --server-id)
                 SERVER_ID="$2"
                 shift 2
@@ -100,63 +56,30 @@ parse_args() {
                 GITHUB_REPO="$2"
                 shift 2
                 ;;
-            --channel)
-                RELEASE_CHANNEL="$2"
-                shift 2
-                ;;
-            --mirror)
-                DOWNLOAD_MIRROR="$2"
-                shift 2
-                ;;
-            --token|--register-token)
-                REGISTER_TOKEN="$2"
-                shift 2
-                ;;
-            -h|--help)
-                usage
-                exit 0
-                ;;
             *)
                 error "未知参数: $1"
                 ;;
         esac
     done
 
-    if [[ -z "$SERVER_ID" || -z "$SECRET_KEY" || -z "$SERVER_URL" ]]; then
-        usage
-        error "缺少必需参数，请提供 --server-id、--secret-key 和 --server"
+    # 验证必需参数
+    if [ -z "$SERVER_ID" ] || [ -z "$SECRET_KEY" ] || [ -z "$SERVER_URL" ]; then
+        error "缺少必需参数。使用方法: $0 --server-id <ID> --secret-key <KEY> --server <URL>"
     fi
 }
 
-normalize_server_url() {
-    SERVER_URL="${SERVER_URL%/}"
-    if [[ -z "$SERVER_URL" ]]; then
-        error "服务器地址不能为空"
-    fi
-
-    if [[ "$SERVER_URL" =~ ^https?:// ]]; then
-        SERVER_API_URL="$SERVER_URL"
-    else
-        SERVER_API_URL="http://${SERVER_URL}"
-    fi
-    info "服务器地址: ${SERVER_API_URL}"
-}
-
+# 检测系统架构
 detect_arch() {
-    local arch
-    arch="$(uname -m)"
-    case "$arch" in
-        x86_64|amd64)
+    local arch=$(uname -m)
+    case $arch in
+        x86_64)
             echo "amd64"
             ;;
         aarch64|arm64)
             echo "arm64"
             ;;
-        armv7l|armv6l|armv8l|armhf)
+        armv7l)
             echo "arm"
-            ;;
-        i386|i686)
-            echo "386"
             ;;
         *)
             error "不支持的架构: $arch"
@@ -164,276 +87,80 @@ detect_arch() {
     esac
 }
 
+# 检测操作系统
 detect_os() {
-    local kernel
-    kernel="$(uname -s)"
-    case "$kernel" in
-        Linux*)
-            echo "linux"
-            ;;
-        Darwin*)
-            echo "darwin"
-            ;;
-        MINGW*|MSYS*|CYGWIN*)
-            echo "windows"
-            ;;
-        *)
-            error "不支持的操作系统: $kernel"
-            ;;
-    esac
+    local kernel_name=$(uname -s)
+    local os=$(echo "$kernel_name" | tr '[:upper:]' '[:lower:]')
+    if [ "$os" == "linux" ]; then
+        echo "linux"
+    elif [ "$os" == "darwin" ]; then
+        echo "darwin"
+    else
+        error "无法检测操作系统"
+        return 1
+    fi
 }
 
-fetch_public_release_config() {
-    info "从 Dashboard 获取公共设置..."
-    local response
-    if ! response=$(curl -fsSL "${SERVER_API_URL}/api/public/settings" 2>/dev/null); then
-        warn "无法从 Dashboard 获取公共配置，使用默认仓库 ${GITHUB_REPO}"
-        return
-    fi
-
-    local parsed
-    if ! parsed=$(
-        BM_JSON="$response" python3 <<'PY' 2>/dev/null
-import json, os
-data=json.loads(os.environ.get("BM_JSON") or "{}")
-repo=data.get("agent_release_repo") or ""
-channel=data.get("agent_release_channel") or ""
-mirror=data.get("agent_release_mirror") or ""
-print(f"{repo}|{channel}|{mirror}")
-PY
-    ); then
-        warn "解析 Dashboard 公共设置失败，使用默认配置"
-        return
-    fi
-
-    IFS='|' read -r repo channel mirror <<<"$parsed"
-    if [[ -n "$repo" ]]; then
+# 从服务器获取发布仓库信息
+get_release_repo() {
+    info "从服务器获取配置信息..."
+    local repo=$(curl -fsSL "${SERVER_URL}/api/public/settings" | grep -o '"agent_release_repo":"[^"]*"' | cut -d'"' -f4)
+    if [ -n "$repo" ]; then
         GITHUB_REPO="$repo"
+        info "使用仓库: $GITHUB_REPO"
+    else
+        warn "无法从服务器获取仓库信息，使用默认仓库: $GITHUB_REPO"
     fi
-    if [[ -n "$channel" ]]; then
-        RELEASE_CHANNEL="$channel"
-    fi
-    if [[ -n "$mirror" ]]; then
-        DOWNLOAD_MIRROR="$mirror"
-    fi
-    info "Release 仓库: ${GITHUB_REPO} (channel: ${RELEASE_CHANNEL})"
 }
 
-fetch_agent_settings() {
-    info "同步服务器配置..."
-    local response
-    if ! response=$(curl -fsSL \
-        -H "X-Secret-Key: ${SECRET_KEY}" \
-        "${SERVER_API_URL}/api/servers/${SERVER_ID}/settings" 2>/dev/null); then
-        warn "无法通过 API 获取服务器设置，将使用默认心跳/监控间隔"
-        return
+# 获取最新版本
+get_latest_version() {
+    info "获取最新版本..." >&2
+    local latest_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+    local version=$(curl -fsSL "$latest_url" | grep '"tag_name":' | cut -d '"' -f 4)
+
+    if [ -z "$version" ]; then
+        error "无法获取最新版本信息" >&2
+        return 1
     fi
 
-    local parsed
-    if ! parsed=$(
-        BM_JSON="$response" python3 <<'PY' 2>/dev/null
-import json, os
-data=json.loads(os.environ.get("BM_JSON") or "{}")
-if isinstance(data, dict) and data.get("success") is False:
-    raise SystemExit(data.get("message") or "dashboard 返回错误")
-hb=data.get("heartbeat_interval") or ""
-mon=data.get("monitor_interval") or ""
-repo=data.get("agent_release_repo") or ""
-channel=data.get("agent_release_channel") or ""
-mirror=data.get("agent_release_mirror") or ""
-print(f"{hb}|{mon}|{repo}|{channel}|{mirror}")
-PY
-    ); then
-        warn "解析服务器设置失败，将继续使用默认值"
-        return
-    fi
-
-    IFS='|' read -r hb mon repo channel mirror <<<"$parsed"
-    if [[ -n "$hb" ]]; then
-        HEARTBEAT_INTERVAL="$hb"
-    fi
-    if [[ -n "$mon" ]]; then
-        MONITOR_INTERVAL="$mon"
-    fi
-    if [[ -n "$repo" ]]; then
-        GITHUB_REPO="$repo"
-    fi
-    if [[ -n "$channel" ]]; then
-        RELEASE_CHANNEL="$channel"
-    fi
-    if [[ "$mirror" != "" ]]; then
-        DOWNLOAD_MIRROR="$mirror"
-    fi
-    info "心跳/监控间隔: ${HEARTBEAT_INTERVAL} / ${MONITOR_INTERVAL}"
+    echo "$version"
 }
 
-select_release_asset() {
-    local os="$1"
-    local arch="$2"
-    local release_data
-    release_data="$(cat)"
-    local result
-    result=$(
-        BM_RELEASE_CHANNEL="${RELEASE_CHANNEL}" BM_OS="$os" BM_ARCH="$arch" BM_RELEASE_JSON="$release_data" \
-        python3 <<'PY' 2>/dev/null
-import json, os
+# 下载并安装agent
+install_agent() {
+    local os=$(detect_os)
+    local arch=$(detect_arch)
+    local version=$(get_latest_version)
 
-channel=os.environ.get("BM_RELEASE_CHANNEL","stable").lower()
-os_name=os.environ["BM_OS"]
-arch=os.environ["BM_ARCH"]
-data=json.loads(os.environ.get("BM_RELEASE_JSON") or "[]")
-if isinstance(data, dict):
-    data=[data]
+    info "检测到系统: $os, 架构: $arch"
+    info "最新版本: $version"
 
-def match_release(rel):
-    if rel.get("draft"):
-        return False
-    if channel == "stable":
-        return not rel.get("prerelease")
-    if channel == "prerelease":
-        return bool(rel.get("prerelease"))
-    if channel == "nightly":
-        name=(rel.get("tag_name") or "") + " " + (rel.get("name") or "")
-        return "nightly" in name.lower()
-    return False
+    # 构建下载URL
+    local download_url="https://github.com/${GITHUB_REPO}/releases/download/${version}/better-monitor-agent-${version#v}-${os}-${arch}"
 
-release=next((r for r in data if match_release(r)), None)
-if release is None and channel in {"prerelease","nightly"}:
-    release=next((r for r in data if not r.get("draft")), None)
-if release is None:
-    release=data[0] if data else None
-if release is None:
-    raise SystemExit("没有找到可用的 Release")
+    info "下载地址: $download_url"
+    info "开始下载..."
 
-assets=release.get("assets") or []
-tag=release.get("tag_name") or ""
-version=tag.lstrip("vV")
-expected_suffix=f"{os_name}-{arch}"
-preferred_patterns=[]
-extensions=["", ".exe", ".tar.gz", ".tgz", ".zip"]
+    # 创建安装目录
+    sudo mkdir -p "$INSTALL_DIR"
 
-if version:
-    preferred_patterns.append(f"better-monitor-agent-{version}-{expected_suffix}")
-    preferred_patterns.append(f"better-monitor-agent-{version}-{os_name}-{arch}")
-    preferred_patterns.append(f"better-monitor-agent-{version}-{os_name}")
-
-preferred_patterns.append(f"better-monitor-agent-{expected_suffix}")
-preferred_patterns.append(f"better-monitor-agent-{os_name}-{arch}")
-preferred_patterns.append(f"better-monitor-agent-{os_name}")
-
-def find_by_pattern():
-    for pattern in preferred_patterns:
-        for ext in extensions:
-            target=pattern+ext
-            for asset in assets:
-                name=asset.get("name") or ""
-                if name == target:
-                    return asset
-    return None
-
-selected=find_by_pattern()
-if selected is None:
-    for asset in assets:
-        name=asset.get("name") or ""
-        if "better-monitor-agent" in name and expected_suffix in name:
-            selected=asset
-            break
-if selected is None:
-    raise SystemExit("未找到匹配的 Release 资产")
-
-print("|".join([
-    tag or "",
-    selected.get("name") or "",
-    selected.get("browser_download_url") or ""
-]))
-PY
-    )
-    echo "$result"
-}
-
-download_agent() {
-    local os arch asset_info tag asset_name asset_url download_url
-    os="$(detect_os)"
-    arch="$(detect_arch)"
-    info "检测到系统: ${os}/${arch}"
-
-    local releases_json
-    releases_json=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20") \
-        || error "无法从 GitHub 获取 Release 信息，请检查仓库 ${GITHUB_REPO}"
-
-    asset_info="$(select_release_asset "$os" "$arch" <<<"$releases_json")" \
-        || error "无法解析 Release 信息，请确认仓库 ${GITHUB_REPO} 是否存在对应平台的二进制"
-
-    IFS='|' read -r tag asset_name asset_url <<<"$asset_info"
-    if [[ -z "$asset_url" ]]; then
-        error "未找到可下载的 Release 资产"
+    # 下载二进制文件
+    if ! sudo curl -fsSL -o "${INSTALL_DIR}/${BINARY_NAME}" "$download_url"; then
+        error "下载失败，请检查网络连接或版本是否存在"
     fi
 
-    info "将安装版本: ${tag} (${asset_name})"
+    # 添加执行权限
+    sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 
-    download_url="$asset_url"
-    if [[ -n "$DOWNLOAD_MIRROR" && "$asset_url" == https://github.com/* ]]; then
-        download_url="${DOWNLOAD_MIRROR%/}${asset_url#https://github.com}"
-        info "使用镜像下载: ${DOWNLOAD_MIRROR}"
-    fi
-
-    TMP_DIR="$(mktemp -d)"
-    trap cleanup EXIT
-
-    local tmp_bin="${TMP_DIR}/${BINARY_NAME}"
-    info "开始下载 Agent..."
-    curl -fL --retry 3 --retry-delay 2 -o "$tmp_bin" "$download_url" \
-        || error "下载失败，请稍后再试"
-
-    chmod +x "$tmp_bin"
-
-    info "安装 Agent 到 ${BIN_DIR}"
-    $SUDO_CMD mkdir -p "$BIN_DIR"
-    $SUDO_CMD install -m 0755 "$tmp_bin" "${BIN_DIR}/${BINARY_NAME}"
+    info "Agent 下载完成"
 }
 
-create_config() {
-    info "写入配置文件 ${CONFIG_FILE}"
-    $SUDO_CMD mkdir -p "$CONFIG_DIR"
-    $SUDO_CMD mkdir -p "$LOG_DIR"
-
-    $SUDO_CMD tee "$CONFIG_FILE" >/dev/null <<EOF
-server_url: "${SERVER_API_URL}"
-server_id: ${SERVER_ID}
-secret_key: "${SECRET_KEY}"
-register_token: "${REGISTER_TOKEN}"
-heartbeat_interval: "${HEARTBEAT_INTERVAL}"
-monitor_interval: "${MONITOR_INTERVAL}"
-log_level: "info"
-log_file: "${LOG_DIR}/agent.log"
-enable_cpu_monitor: true
-enable_mem_monitor: true
-enable_disk_monitor: true
-enable_network_monitor: true
-update_repo: "${GITHUB_REPO}"
-update_channel: "${RELEASE_CHANNEL}"
-update_mirror: "${DOWNLOAD_MIRROR}"
-EOF
-
-    $SUDO_CMD chmod 600 "$CONFIG_FILE"
-}
-
-service_exists() {
-    command -v systemctl >/dev/null 2>&1 && $SUDO_CMD systemctl list-unit-files | grep -Fq "${SERVICE_NAME}.service"
-}
-
+# 创建systemd服务
 create_systemd_service() {
-    if ! command -v systemctl >/dev/null 2>&1; then
-        warn "未检测到 systemd，跳过服务安装，请手动管理 ${BIN_DIR}/${BINARY_NAME}"
-        return
-    fi
-
     info "创建 systemd 服务..."
-    if service_exists; then
-        $SUDO_CMD systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
-    fi
 
-    $SUDO_CMD tee "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null <<EOF
+    sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<EOF
 [Unit]
 Description=Better Monitor Agent
 After=network.target
@@ -441,10 +168,9 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=${INSTALL_ROOT}
-ExecStart=${BIN_DIR}/${BINARY_NAME} --config ${CONFIG_FILE}
+ExecStart=${INSTALL_DIR}/${BINARY_NAME} --server ${SERVER_URL} --server-id ${SERVER_ID} --secret-key ${SECRET_KEY}
 Restart=always
-RestartSec=5
+RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
@@ -452,57 +178,68 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-    $SUDO_CMD systemctl daemon-reload
-    $SUDO_CMD systemctl enable "${SERVICE_NAME}" >/dev/null
+    # 重载systemd配置
+    sudo systemctl daemon-reload
+
+    info "systemd 服务创建完成"
 }
 
+# 启动服务
 start_service() {
-    if ! command -v systemctl >/dev/null 2>&1; then
-        return
-    fi
-
     info "启动服务..."
-    $SUDO_CMD systemctl restart "${SERVICE_NAME}"
+
+    sudo systemctl enable ${SERVICE_NAME}
+    sudo systemctl start ${SERVICE_NAME}
+
+    # 等待服务启动
     sleep 2
-    if $SUDO_CMD systemctl is-active --quiet "${SERVICE_NAME}"; then
-        info "Agent 服务启动成功"
+
+    # 检查服务状态
+    if sudo systemctl is-active --quiet ${SERVICE_NAME}; then
+        info "服务启动成功！"
+        info "查看服务状态: sudo systemctl status ${SERVICE_NAME}"
+        info "查看日志: sudo journalctl -u ${SERVICE_NAME} -f"
     else
-        warn "Agent 服务未成功启动，请使用 'systemctl status ${SERVICE_NAME}' 查看详情"
+        error "服务启动失败，请查看日志: sudo journalctl -u ${SERVICE_NAME} -n 50"
     fi
 }
 
-prepare_env() {
-    if [[ "$EUID" -ne 0 ]]; then
-        if ! command -v sudo >/dev/null 2>&1; then
-            error "脚本需要 root 权限或 sudo，请以 root 运行或安装 sudo"
-        fi
-        SUDO_CMD="sudo"
-    fi
-
-    require_cmd curl
-    require_cmd python3
-}
-
+# 主函数
 main() {
-    info "Better Monitor Agent 安装程序"
+    info "Better Monitor Agent 一键安装脚本"
+    info "================================"
+
+    # 检查是否为root或有sudo权限
+    if [ "$EUID" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+        error "此脚本需要 root 权限或 sudo 权限"
+    fi
+
+    # 解析参数
     parse_args "$@"
-    prepare_env
-    normalize_server_url
-    fetch_public_release_config
-    fetch_agent_settings
-    download_agent
-    create_config
+
+    # 获取发布仓库
+    get_release_repo
+
+    # 安装agent
+    install_agent
+
+    # 创建systemd服务
     create_systemd_service
+
+    # 启动服务
     start_service
 
-    info "===================================="
+    info "================================"
     info "安装完成！"
-    info "配置文件: ${CONFIG_FILE}"
-    info "日志文件: ${LOG_DIR}/agent.log"
-    if command -v systemctl >/dev/null 2>&1; then
-        info "查看状态: sudo systemctl status ${SERVICE_NAME}"
-        info "查看日志: sudo journalctl -u ${SERVICE_NAME} -f"
-    fi
+    info "服务器ID: ${SERVER_ID}"
+    info "服务器地址: ${SERVER_URL}"
+    info ""
+    info "常用命令:"
+    info "  查看状态: sudo systemctl status ${SERVICE_NAME}"
+    info "  停止服务: sudo systemctl stop ${SERVICE_NAME}"
+    info "  重启服务: sudo systemctl restart ${SERVICE_NAME}"
+    info "  查看日志: sudo journalctl -u ${SERVICE_NAME} -f"
 }
 
+# 执行主函数
 main "$@"
