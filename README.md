@@ -108,18 +108,58 @@ better_monitor/
 ### 系统要求
 - **操作系统**: Linux/Windows/macOS
 - **Docker**: 20.10+
-- **Docker Compose**: 2.0+
+- **Docker Compose**: 2.0+ (可选)
 - **端口**: 3333 (Dashboard)
+- **磁盘空间**: 建议至少 2GB 可用空间
 
-### 方式一：Docker部署（推荐）
+### 方式一：一键安装（推荐）
 
-#### 1. 拉取镜像部署
+使用官方安装脚本，支持安装、升级、卸载和数据迁移：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/EnderKC/BetterMonitorrefs/heads/main/install-dashboard.sh | sudo bash
+```
+
+或者下载后执行：
+
+```bash
+wget https://raw.githubusercontent.com/EnderKC/BetterMonitor/main/install-dashboard.sh
+chmod +x install-dashboard.sh
+sudo ./install-dashboard.sh
+```
+
+**脚本功能：**
+- 🚀 一键安装面板
+- 🔄 一键升级到最新版本
+- 🗑️ 一键卸载（可选保留数据）
+- 📦 数据备份与恢复
+- 🔀 服务器间数据迁移
+- 📊 查看运行状态
+
+**命令行模式：**
+```bash
+# 直接安装
+sudo ./install-dashboard.sh install
+
+# 升级面板
+sudo ./install-dashboard.sh upgrade
+
+# 备份数据
+sudo ./install-dashboard.sh backup
+
+# 查看状态
+sudo ./install-dashboard.sh status
+```
+
+### 方式二：Docker Compose 部署
+
+#### 1. 使用预构建镜像（推荐）
 ```bash
 # 创建目录
-mkdir better-monitor && cd better-monitor
+mkdir -p /opt/better-monitor && cd /opt/better-monitor
 
-# 创建docker-compose.yml
-cat > docker-compose.yml << EOF
+# 创建 docker-compose.yml
+cat > docker-compose.yml << 'EOF'
 version: '3.8'
 
 services:
@@ -135,8 +175,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - TZ=Asia/Shanghai
-      - JWT_SECRET=your_jwt_secret_key_change_this_in_production
-      - VERSION=1.0.5
+      - JWT_SECRET=${JWT_SECRET:-$(openssl rand -base64 32)}
+      - VERSION=latest
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -151,14 +191,14 @@ EOF
 docker-compose up -d
 
 # 查看日志
-docker-compose logs -f
+docker-compose logs -f better-monitor
 ```
 
 #### 2. 源码构建部署
 ```bash
 # 克隆项目
-git clone <repository-url>
-cd better_monitor
+git clone https://github.com/EnderKC/BetterMonitor.git
+cd BetterMonitor
 
 # 构建并启动
 docker-compose -f docker-compose.all-in-one.yml up -d --build
@@ -167,17 +207,120 @@ docker-compose -f docker-compose.all-in-one.yml up -d --build
 docker-compose -f docker-compose.all-in-one.yml ps
 ```
 
-### 方式二：手动部署
-1. 从 [Releases](https://github.com/your-username/better-monitor/releases) 页面下载最新的 `better-monitor` 后端和前端构建产物（或使用 Docker 构建）。
-2. 将 `backend` 和 `frontend` 编译后的文件部署到目标服务器，`agent` 可在需要的服务器上单独下载运行。
-3. 执行 `backend` 二进制，提供 `JWT_SECRET`、`DB_PATH` 等环境变量；`frontend` 可由任意静态文件服务器托管。
+### 方式三：Docker Run 部署
+
+适合不想使用 Docker Compose 的场景：
+
+```bash
+# 创建数据目录
+mkdir -p /opt/better-monitor/{data,logs}
+
+# 生成 JWT Secret
+JWT_SECRET=$(openssl rand -base64 32)
+
+# 运行容器
+docker run -d \
+  --name better-monitor \
+  --restart unless-stopped \
+  -p 3333:3333 \
+  -v /opt/better-monitor/data:/app/data:rw \
+  -v /opt/better-monitor/logs:/app/logs:rw \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -e TZ=Asia/Shanghai \
+  -e JWT_SECRET="${JWT_SECRET}" \
+  -e VERSION=latest \
+  --security-opt no-new-privileges:true \
+  enderhkc/better-monitor:latest
+
+# 查看日志
+docker logs -f better-monitor
+```
+
+### 方式四：手动部署
+
+适合需要自定义部署的高级用户：
+
+1. 从 [Releases](https://github.com/EnderKC/BetterMonitor/releases) 页面下载最新版本
+2. 解压并配置环境变量
+3. 启动后端服务和前端静态文件服务器
+
+详细步骤请参考：[手动部署文档](docs/manual-deployment.md)
 
 ### 访问系统
-- **Dashboard**: http://localhost:3333
+
+安装完成后，通过浏览器访问：
+
+- **访问地址**: http://your-server-ip:3333
 - **默认账号**: admin
 - **默认密码**: 123456
 
-> ⚠️ **安全提醒**: 首次登录后请立即修改默认密码！
+> ⚠️ **安全提醒**:
+> 1. 首次登录后请立即修改默认密码
+> 2. 建议配置 HTTPS 证书
+> 3. 妥善保管 JWT_SECRET
+> 4. 定期备份数据
+
+### 常用管理命令
+
+```bash
+# 查看容器状态
+docker ps -a | grep better-monitor
+
+# 查看实时日志
+docker logs -f better-monitor
+
+# 重启服务
+docker restart better-monitor
+
+# 停止服务
+docker stop better-monitor
+
+# 启动服务
+docker start better-monitor
+
+# 进入容器
+docker exec -it better-monitor bash
+
+# 查看资源使用
+docker stats better-monitor
+
+# 更新到最新版本
+docker pull enderhkc/better-monitor:latest
+docker stop better-monitor
+docker rm better-monitor
+# 然后重新运行 docker run 命令
+```
+
+### 数据备份与迁移
+
+使用一键脚本进行数据管理：
+
+```bash
+# 备份数据
+sudo ./install-dashboard.sh backup
+
+# 恢复数据
+sudo ./install-dashboard.sh restore
+
+# 创建迁移包（用于迁移到新服务器）
+sudo ./install-dashboard.sh migrate
+# 选择 "1. 创建迁移包"
+
+# 在新服务器上导入迁移包
+sudo ./install-dashboard.sh migrate
+# 选择 "2. 导入迁移包"
+```
+
+**手动备份：**
+```bash
+# 备份数据目录
+tar -czf better-monitor-backup-$(date +%Y%m%d).tar.gz \
+  -C /opt/better-monitor data logs .env docker-compose.yml
+
+# 恢复数据
+tar -xzf better-monitor-backup-20240101.tar.gz -C /opt/better-monitor
+docker restart better-monitor
+```
 
 ## 🔧 Agent安装与配置
 

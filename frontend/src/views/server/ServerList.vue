@@ -224,7 +224,7 @@ const viewToken = (server: any) => {
                 size: 'small',
                 shape: 'round',
                 onClick: () => copyToClipboard(
-                  `curl -fsSL https://raw.githubusercontent.com/${releaseRepo}/main/install-agent.sh | bash -s -- --server-id ${serverId} --secret-key ${secretKey} --server ${dashboardUrl}`,
+                  `curl -fsSL https://raw.githubusercontent.com/${releaseRepo}/refs/heads/main/install-agent.sh | bash -s -- --server-id ${serverId} --secret-key ${secretKey} --server ${dashboardUrl}`,
                   '一键安装'
                 )
               }, [
@@ -233,7 +233,7 @@ const viewToken = (server: any) => {
               ])
             ]),
             h('pre', { class: 'install-command' },
-              `curl -fsSL https://raw.githubusercontent.com/${releaseRepo}/main/install-agent.sh | bash -s -- --server-id ${serverId} --secret-key ${secretKey} --server ${dashboardUrl}`
+              `curl -fsSL https://raw.githubusercontent.com/${releaseRepo}/refs/heads/main/install-agent.sh | bash -s -- --server-id ${serverId} --secret-key ${secretKey} --server ${dashboardUrl}`
             )
           ]),
           h('p', { style: 'font-weight: bold; margin-top: 24px;' }, '方式二：手动安装'),
