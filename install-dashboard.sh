@@ -6,7 +6,8 @@
 # 描述: 用于 Docker 环境下的 Better Monitor 面板安装、升级、卸载和数据迁移
 #==============================================================================
 
-set -e
+set -euo pipefail
+shopt -s nullglob
 
 # 颜色定义
 RED='\033[0;31m'
@@ -15,14 +16,20 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# 配置变量
-INSTALL_DIR="/opt/better-monitor"
-DOCKER_IMAGE="enderhkc/better-monitor:latest"
-CONTAINER_NAME="better-monitor"
-DATA_DIR="${INSTALL_DIR}/data"
-LOGS_DIR="${INSTALL_DIR}/logs"
-BACKUP_DIR="${INSTALL_DIR}/backups"
-PORT=3333
+# 配置变量（支持通过环境变量覆盖）
+INSTALL_DIR="${INSTALL_DIR:-/opt/better-monitor}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-enderhkc/better-monitor:latest}"
+CONTAINER_NAME="${CONTAINER_NAME:-better-monitor}"
+PORT="${PORT:-3333}"
+DATA_DIR="${DATA_DIR:-${INSTALL_DIR}/data}"
+LOGS_DIR="${LOGS_DIR:-${INSTALL_DIR}/logs}"
+BACKUP_DIR="${BACKUP_DIR:-${INSTALL_DIR}/backups}"
+ENV_FILE="${ENV_FILE:-${INSTALL_DIR}/.env}"
+COMPOSE_FILE="${COMPOSE_FILE:-${INSTALL_DIR}/docker-compose.yml}"
+TZ="${TZ:-Asia/Shanghai}"
+COMPOSE_BIN=()
+JWT_SECRET="${JWT_SECRET:-}"
+ENV_LOADED_PATH=""
 
 #==============================================================================
 # 工具函数
@@ -77,13 +84,36 @@ check_docker() {
     print_success "Docker 环境检查通过"
 }
 
-# 检查 Docker Compose 是否安装
-check_docker_compose() {
-    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
-        print_warning "Docker Compose 未安装，将使用 docker run 方式部署"
+# 检测 Docker Compose
+detect_compose_cmd() {
+    if docker compose version &>/dev/null; then
+        COMPOSE_BIN=(docker compose)
+        return 0
+    fi
+
+    if command -v docker-compose &>/dev/null; then
+        COMPOSE_BIN=(docker-compose)
+        return 0
+    fi
+
+    COMPOSE_BIN=()
+    return 1
+}
+
+ensure_compose() {
+    if detect_compose_cmd; then
+        return 0
+    fi
+
+    print_warning "Docker Compose 未安装，将使用 docker run 方式部署"
+    return 1
+}
+
+run_compose_cmd() {
+    if [[ ${#COMPOSE_BIN[@]} -eq 0 ]]; then
         return 1
     fi
-    return 0
+    (cd "${INSTALL_DIR}" && "${COMPOSE_BIN[@]}" "$@")
 }
 
 # 检查端口是否被占用
@@ -119,7 +149,7 @@ create_docker_compose() {
 
     print_info "创建 docker-compose.yml 配置文件..."
 
-    cat > "${INSTALL_DIR}/docker-compose.yml" <<EOF
+    cat > "${COMPOSE_FILE}" <<EOF
 version: '3.8'
 
 services:
@@ -134,7 +164,7 @@ services:
       - ${LOGS_DIR}:/app/logs:rw
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - TZ=Asia/Shanghai
+      - TZ=${TZ}
       - JWT_SECRET=${jwt_secret}
       - VERSION=latest
     security_opt:
@@ -154,7 +184,7 @@ EOF
 create_env_file() {
     local jwt_secret="${1:-$(generate_jwt_secret)}"
 
-    cat > "${INSTALL_DIR}/.env" <<EOF
+    cat > "${ENV_FILE}" <<EOF
 # Better Monitor 配置文件
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
 
@@ -165,13 +195,37 @@ JWT_SECRET=${jwt_secret}
 PORT=${PORT}
 
 # 时区配置
-TZ=Asia/Shanghai
+TZ=${TZ}
 
 # Docker 镜像
 DOCKER_IMAGE=${DOCKER_IMAGE}
 EOF
 
-    chmod 600 "${INSTALL_DIR}/.env"
+    chmod 600 "${ENV_FILE}"
+}
+
+load_env_file() {
+    if [ -f "${ENV_FILE}" ]; then
+        if [[ "${ENV_LOADED_PATH}" != "${ENV_FILE}" ]]; then
+            print_info "加载环境配置: ${ENV_FILE}"
+            ENV_LOADED_PATH="${ENV_FILE}"
+        fi
+        # shellcheck disable=SC1090
+        source "${ENV_FILE}"
+    fi
+}
+
+cleanup_old_backups() {
+    local removable
+    removable=$(ls -1t "${BACKUP_DIR}"/better-monitor-backup-*.tar.gz 2>/dev/null | tail -n +6 || true)
+    if [[ -z "${removable}" ]]; then
+        return
+    fi
+
+    print_info "清理旧备份..."
+    while IFS= read -r old_file; do
+        [[ -n "${old_file}" ]] && rm -f "${old_file}"
+    done <<<"${removable}"
 }
 
 #==============================================================================
@@ -182,6 +236,8 @@ EOF
 install_dashboard() {
     print_info "开始安装 Better Monitor Dashboard..."
     echo ""
+
+    load_env_file
 
     # 检查环境
     check_root
@@ -195,8 +251,8 @@ install_dashboard() {
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             print_info "停止并删除旧容器..."
-            docker stop ${CONTAINER_NAME} 2>/dev/null || true
-            docker rm ${CONTAINER_NAME} 2>/dev/null || true
+            docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+            docker rm "${CONTAINER_NAME}" 2>/dev/null || true
         else
             print_info "安装已取消"
             exit 0
@@ -207,40 +263,35 @@ install_dashboard() {
     create_directories
 
     # 生成 JWT Secret
-    JWT_SECRET=$(generate_jwt_secret)
+    local jwt_secret="${JWT_SECRET:-$(generate_jwt_secret)}"
+    JWT_SECRET="$jwt_secret"
 
     # 创建配置文件
-    create_docker_compose "${JWT_SECRET}"
-    create_env_file "${JWT_SECRET}"
+    create_docker_compose "${jwt_secret}"
+    create_env_file "${jwt_secret}"
 
     # 拉取镜像
     print_info "拉取 Docker 镜像..."
-    docker pull ${DOCKER_IMAGE}
+    docker pull "${DOCKER_IMAGE}"
 
     # 启动容器
     print_info "启动 Better Monitor 容器..."
-    cd "${INSTALL_DIR}"
-
-    if check_docker_compose; then
-        if docker compose version &> /dev/null; then
-            docker compose up -d
-        else
-            docker-compose up -d
-        fi
+    if ensure_compose; then
+        run_compose_cmd up -d
     else
         # 使用 docker run 方式
         docker run -d \
-            --name ${CONTAINER_NAME} \
+            --name "${CONTAINER_NAME}" \
             --restart unless-stopped \
-            -p ${PORT}:3333 \
-            -v ${DATA_DIR}:/app/data:rw \
-            -v ${LOGS_DIR}:/app/logs:rw \
+            -p "${PORT}:3333" \
+            -v "${DATA_DIR}:/app/data:rw" \
+            -v "${LOGS_DIR}:/app/logs:rw" \
             -v /var/run/docker.sock:/var/run/docker.sock:ro \
-            -e TZ=Asia/Shanghai \
-            -e JWT_SECRET=${JWT_SECRET} \
+            -e TZ="${TZ}" \
+            -e JWT_SECRET="${jwt_secret}" \
             -e VERSION=latest \
             --security-opt no-new-privileges:true \
-            ${DOCKER_IMAGE}
+            "${DOCKER_IMAGE}"
     fi
 
     # 等待服务启动
@@ -259,7 +310,7 @@ install_dashboard() {
         echo ""
         echo "重要提示:"
         echo "  1. 请立即登录并修改默认密码"
-        echo "  2. JWT Secret 已保存在: ${INSTALL_DIR}/.env"
+        echo "  2. JWT Secret 已保存在: ${ENV_FILE}"
         echo "  3. 数据目录: ${DATA_DIR}"
         echo "  4. 日志目录: ${LOGS_DIR}"
         echo ""
@@ -280,6 +331,8 @@ upgrade_dashboard() {
     print_info "开始升级 Better Monitor Dashboard..."
     echo ""
 
+    load_env_file
+
     check_root
     check_docker
 
@@ -295,43 +348,33 @@ upgrade_dashboard() {
 
     # 拉取最新镜像
     print_info "拉取最新镜像..."
-    docker pull ${DOCKER_IMAGE}
+    docker pull "${DOCKER_IMAGE}"
 
     # 停止并删除旧容器
     print_info "停止旧容器..."
-    docker stop ${CONTAINER_NAME}
-    docker rm ${CONTAINER_NAME}
+    docker stop "${CONTAINER_NAME}"
+    docker rm "${CONTAINER_NAME}"
 
     # 启动新容器
     print_info "启动新容器..."
-    cd "${INSTALL_DIR}"
+    local jwt_secret="${JWT_SECRET:-$(generate_jwt_secret)}"
+    JWT_SECRET="$jwt_secret"
 
-    if check_docker_compose && [ -f "${INSTALL_DIR}/docker-compose.yml" ]; then
-        if docker compose version &> /dev/null; then
-            docker compose up -d
-        else
-            docker-compose up -d
-        fi
+    if detect_compose_cmd && [ -f "${COMPOSE_FILE}" ]; then
+        run_compose_cmd up -d
     else
-        # 读取环境变量
-        if [ -f "${INSTALL_DIR}/.env" ]; then
-            source "${INSTALL_DIR}/.env"
-        else
-            JWT_SECRET=$(generate_jwt_secret)
-        fi
-
         docker run -d \
-            --name ${CONTAINER_NAME} \
+            --name "${CONTAINER_NAME}" \
             --restart unless-stopped \
-            -p ${PORT}:3333 \
-            -v ${DATA_DIR}:/app/data:rw \
-            -v ${LOGS_DIR}:/app/logs:rw \
+            -p "${PORT}:3333" \
+            -v "${DATA_DIR}:/app/data:rw" \
+            -v "${LOGS_DIR}:/app/logs:rw" \
             -v /var/run/docker.sock:/var/run/docker.sock:ro \
-            -e TZ=Asia/Shanghai \
-            -e JWT_SECRET=${JWT_SECRET} \
+            -e TZ="${TZ}" \
+            -e JWT_SECRET="${jwt_secret}" \
             -e VERSION=latest \
             --security-opt no-new-privileges:true \
-            ${DOCKER_IMAGE}
+            "${DOCKER_IMAGE}"
     fi
 
     # 等待服务启动
@@ -355,6 +398,8 @@ upgrade_dashboard() {
 uninstall_dashboard() {
     print_warning "即将卸载 Better Monitor Dashboard"
     echo ""
+
+    load_env_file
     echo "此操作将："
     echo "  1. 停止并删除 Docker 容器"
     echo "  2. 删除 Docker 镜像"
@@ -372,8 +417,8 @@ uninstall_dashboard() {
     # 停止并删除容器
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         print_info "停止并删除容器..."
-        docker stop ${CONTAINER_NAME} 2>/dev/null || true
-        docker rm ${CONTAINER_NAME} 2>/dev/null || true
+        docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+        docker rm "${CONTAINER_NAME}" 2>/dev/null || true
         print_success "容器已删除"
     fi
 
@@ -382,7 +427,7 @@ uninstall_dashboard() {
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         print_info "删除 Docker 镜像..."
-        docker rmi ${DOCKER_IMAGE} 2>/dev/null || true
+        docker rmi "${DOCKER_IMAGE}" 2>/dev/null || true
         print_success "镜像已删除"
     fi
 
@@ -414,6 +459,7 @@ backup_data() {
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local backup_file="${BACKUP_DIR}/better-monitor-backup-${backup_type}-${timestamp}.tar.gz"
 
+    load_env_file
     print_info "创建数据备份..."
 
     # 确保备份目录存在
@@ -431,10 +477,7 @@ backup_data() {
 
         if [ -f "${backup_file}" ]; then
             print_success "备份创建成功: ${backup_file}"
-
-            # 只保留最近 5 个备份
-            print_info "清理旧备份..."
-            ls -t ${BACKUP_DIR}/better-monitor-backup-*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
+            cleanup_old_backups
         else
             print_warning "备份创建失败"
         fi
@@ -445,22 +488,26 @@ backup_data() {
 
 # 恢复数据
 restore_data() {
+    load_env_file
     print_info "可用的备份文件："
     echo ""
 
     # 列出所有备份
-    local backups=($(ls -t ${BACKUP_DIR}/better-monitor-backup-*.tar.gz 2>/dev/null))
-
-    if [ ${#backups[@]} -eq 0 ]; then
+    if ! compgen -G "${BACKUP_DIR}/better-monitor-backup-*.tar.gz" >/dev/null; then
         print_error "没有找到备份文件"
         exit 1
     fi
 
+    mapfile -t backups < <(ls -1t "${BACKUP_DIR}"/better-monitor-backup-*.tar.gz)
+
     # 显示备份列表
     for i in "${!backups[@]}"; do
-        local size=$(du -h "${backups[$i]}" | cut -f1)
-        local date=$(stat -c %y "${backups[$i]}" | cut -d' ' -f1,2 | cut -d'.' -f1)
-        echo "  [$((i+1))] $(basename ${backups[$i]}) - ${size} - ${date}"
+        local file="${backups[$i]}"
+        local size
+        size=$(du -h "${file}" | cut -f1)
+        local date
+        date=$(stat -c %y "${file}" | cut -d' ' -f1,2 | cut -d'.' -f1)
+        echo "  [$((i+1))] $(basename "${file}") - ${size} - ${date}"
     done
 
     echo ""
@@ -485,7 +532,7 @@ restore_data() {
     # 停止容器
     if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         print_info "停止容器..."
-        docker stop ${CONTAINER_NAME}
+        docker stop "${CONTAINER_NAME}"
     fi
 
     # 备份当前数据
@@ -499,7 +546,7 @@ restore_data() {
     # 启动容器
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         print_info "启动容器..."
-        docker start ${CONTAINER_NAME}
+        docker start "${CONTAINER_NAME}"
     fi
 
     print_success "数据恢复完成"
@@ -507,6 +554,7 @@ restore_data() {
 
 # 迁移数据
 migrate_data() {
+    load_env_file
     print_info "Better Monitor 数据迁移工具"
     echo ""
     echo "此工具用于将数据迁移到新服务器"
@@ -529,10 +577,11 @@ migrate_data() {
             print_info "创建迁移包..."
 
             # 停止容器以确保数据一致性
+            local need_restart=false
             if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
                 print_info "停止容器以确保数据一致性..."
-                docker stop ${CONTAINER_NAME}
-                local need_restart=true
+                docker stop "${CONTAINER_NAME}"
+                need_restart=true
             fi
 
             # 创建迁移包
@@ -541,9 +590,9 @@ migrate_data() {
                 data logs .env docker-compose.yml 2>/dev/null || true
 
             # 重启容器
-            if [ "$need_restart" = true ]; then
+            if [ "${need_restart}" = true ]; then
                 print_info "重启容器..."
-                docker start ${CONTAINER_NAME}
+                docker start "${CONTAINER_NAME}"
             fi
 
             if [ -f "${migration_file}" ]; then
@@ -577,7 +626,7 @@ migrate_data() {
             # 停止容器
             if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
                 print_info "停止容器..."
-                docker stop ${CONTAINER_NAME}
+                docker stop "${CONTAINER_NAME}"
             fi
 
             # 备份当前数据
@@ -592,47 +641,38 @@ migrate_data() {
             # 解压迁移包
             print_info "导入数据..."
             tar -xzf "$migration_file" -C "${INSTALL_DIR}"
+            load_env_file
 
             # 如果容器不存在，则安装
             if ! docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
                 print_info "容器不存在，开始安装..."
 
                 # 拉取镜像
-                docker pull ${DOCKER_IMAGE}
+                docker pull "${DOCKER_IMAGE}"
+                local jwt_secret="${JWT_SECRET:-$(generate_jwt_secret)}"
+                JWT_SECRET="$jwt_secret"
 
                 # 启动容器
-                cd "${INSTALL_DIR}"
-                if check_docker_compose && [ -f "${INSTALL_DIR}/docker-compose.yml" ]; then
-                    if docker compose version &> /dev/null; then
-                        docker compose up -d
-                    else
-                        docker-compose up -d
-                    fi
+                if detect_compose_cmd && [ -f "${COMPOSE_FILE}" ]; then
+                    run_compose_cmd up -d
                 else
-                    # 读取环境变量
-                    if [ -f "${INSTALL_DIR}/.env" ]; then
-                        source "${INSTALL_DIR}/.env"
-                    else
-                        JWT_SECRET=$(generate_jwt_secret)
-                    fi
-
                     docker run -d \
-                        --name ${CONTAINER_NAME} \
+                        --name "${CONTAINER_NAME}" \
                         --restart unless-stopped \
-                        -p ${PORT}:3333 \
-                        -v ${DATA_DIR}:/app/data:rw \
-                        -v ${LOGS_DIR}:/app/logs:rw \
+                        -p "${PORT}:3333" \
+                        -v "${DATA_DIR}:/app/data:rw" \
+                        -v "${LOGS_DIR}:/app/logs:rw" \
                         -v /var/run/docker.sock:/var/run/docker.sock:ro \
-                        -e TZ=Asia/Shanghai \
-                        -e JWT_SECRET=${JWT_SECRET} \
+                        -e TZ="${TZ}" \
+                        -e JWT_SECRET="${jwt_secret}" \
                         -e VERSION=latest \
                         --security-opt no-new-privileges:true \
-                        ${DOCKER_IMAGE}
+                        "${DOCKER_IMAGE}"
                 fi
             else
                 # 启动现有容器
                 print_info "启动容器..."
-                docker start ${CONTAINER_NAME}
+                docker start "${CONTAINER_NAME}"
             fi
 
             print_success "数据迁移完成"
@@ -648,6 +688,7 @@ migrate_data() {
 
 # 查看状态
 show_status() {
+    load_env_file
     print_info "Better Monitor 状态信息"
     echo ""
 
@@ -659,7 +700,7 @@ show_status() {
 
         # 资源使用
         echo "资源使用:"
-        docker stats ${CONTAINER_NAME} --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
+        docker stats "${CONTAINER_NAME}" --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
         echo ""
 
         # 磁盘使用
@@ -680,7 +721,7 @@ show_status() {
 
         # 日志
         echo "最近日志:"
-        docker logs ${CONTAINER_NAME} --tail 10
+        docker logs "${CONTAINER_NAME}" --tail 10
     else
         print_warning "Better Monitor 未安装或容器不存在"
     fi
@@ -711,6 +752,8 @@ show_menu() {
 #==============================================================================
 
 main() {
+    load_env_file
+
     # 如果有参数，直接执行对应功能
     if [ $# -gt 0 ]; then
         case $1 in
@@ -745,6 +788,7 @@ main() {
 
     # 交互式菜单
     while true; do
+        load_env_file
         show_menu
         case $REPLY in
             1)
